@@ -124,6 +124,23 @@ def collect_s3(session: boto3.Session) -> dict[str, Any]:
     return {"buckets": enriched}
 
 
+def collect_instance_profiles(session: boto3.Session) -> dict[str, str]:
+    """Map instance-profile name -> role name.
+
+    Used by the Graph Engine (Phase 5) to resolve the approximate RUNS_AS
+    edge AWSProvider records at Phase 1/2 time into an exact role edge.
+    """
+    iam = session.client("iam")
+    mapping: dict[str, str] = {}
+    paginator = iam.get_paginator("list_instance_profiles")
+    for page in paginator.paginate():
+        for profile in page["InstanceProfiles"]:
+            roles = profile.get("Roles", [])
+            if roles:
+                mapping[profile["InstanceProfileName"]] = roles[0]["RoleName"]
+    return mapping
+
+
 def get_caller_identity(session: boto3.Session) -> dict[str, Any]:
     """Used to resolve the current account id at scan start."""
     sts = session.client("sts")
