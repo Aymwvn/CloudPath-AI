@@ -172,3 +172,16 @@ class CrownJewelModel(Base):
     account_external_id = Column(String, nullable=False)
     asset_id = Column(String, nullable=False)
     label = Column(String, nullable=False)
+
+
+class MitreTechniqueModel(Base):
+    """Phase 14 — deterministic MITRE ATT&CK mappings for an attack path."""
+
+    __tablename__ = "mitre_techniques"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    attack_path_id = Column(String, ForeignKey("attack_paths.id"), nullable=False)
+    technique_id = Column(String, nullable=False)
+    technique_name = Column(String, nullable=False)
+    evidence = Column(JSON, default=dict)
+    confidence = Column(Float, default=1.0)

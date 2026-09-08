@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from backend.db import models
 from backend.db.queries import rebuild_scan_record
 from backend.scan_service import ScanRecord
+from mitre.mapper import MitreMapper
 
 
 @dataclass
@@ -139,6 +140,22 @@ class PostgresScanStore:
                             edge_type=step.edge_type,
                             confidence=step.confidence,
                             evidence=_json_safe(step.evidence),
+                        )
+                    )
+
+                # Phase 14 — deterministic MITRE mapping, computed at
+                # persist time since it's cheap and doesn't need the AI
+                # layer at all.
+                target_asset = next((a for a in record.scan_result.assets if a.id == path.target), None)
+                mappings = MitreMapper().map_path(path, target_node_type=target_asset.type if target_asset else None)
+                for mapping in mappings:
+                    session.add(
+                        models.MitreTechniqueModel(
+                            attack_path_id=path_row.id,
+                            technique_id=mapping.technique_id,
+                            technique_name=mapping.technique_name,
+                            evidence=_json_safe(mapping.evidence),
+                            confidence=mapping.confidence,
                         )
                     )
 
