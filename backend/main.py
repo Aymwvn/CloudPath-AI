@@ -16,10 +16,15 @@ from fastapi import FastAPI, HTTPException
 from backend.scan_service import ScanService
 from backend.schemas import (
     AssetOut,
+    AttackPathAnalysisOut,
     AttackPathOut,
     AttackPathStepOut,
+    EdgeRemovalIn,
     ScanRequest,
     ScanSummary,
+    SimulationPathOut,
+    SimulationRequest,
+    SimulationResultOut,
     StatisticsOut,
 )
 
@@ -164,6 +169,118 @@ def get_statistics(scan_id: str | None = None) -> StatisticsOut:
     )
 
 
+@app.get("/api/v1/attack-paths/{attack_path_id}/mitre")
+def get_mitre_mappings(attack_path_id: str) -> list[dict]:
+    """Phase 14 — deterministic MITRE ATT&CK mappings, computed at scan
+    persist time (backend/db/store.py), not by the AI layer."""
+    from backend.db import models
+    from backend.db.session import SessionLocal
+
+    session = SessionLocal()
+    try:
+        rows = session.query(models.MitreTechniqueModel).filter_by(attack_path_id=attack_path_id).all()
+        return [
+            {
+                "technique_id": r.technique_id,
+                "technique_name": r.technique_name,
+                "evidence": r.evidence,
+                "confidence": r.confidence,
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+@app.post("/api/v1/simulation", response_model=SimulationResultOut)
+def run_simulation(request: SimulationRequest) -> SimulationResultOut:
+    """Phase 15 — what-if analysis. Removes the given edges from a copy
+    of the graph and shows which attack paths get blocked. Pure
+    simulation — never touches real cloud infrastructure."""
+    from engine.attack_paths.whatif import EdgeRemoval, WhatIfSimulator
+
+    record = service.store.get(request.scan_id) if request.scan_id else service.store.latest()
+    if not record:
+        raise HTTPException(status_code=404, detail="No scan available to simulate against")
+
+    removals = [EdgeRemoval(source_id=e.source_id, target_id=e.target_id, edge_type=e.edge_type) for e in request.remove_edges]
+    result = WhatIfSimulator().simulate(record.scan_result, removals)
+
+    risk_engine_for_before = None
+    from engine.risk.engine import RiskEngine
+    from engine.graph.builder import GraphEngine
+
+    graph_before = GraphEngine().build(record.scan_result)
+    risk_engine_for_before = RiskEngine()
+
+    def _to_out(paths, graph):
+        return [
+            SimulationPathOut(
+                entry=p.entry,
+                target=p.target,
+                hop_count=p.hop_count,
+                risk_score=risk_engine_for_before.score(p, graph).risk_score,
+            )
+            for p in paths
+        ]
+
+    return SimulationResultOut(
+        paths_before_count=len(result.paths_before),
+        paths_after_count=len(result.paths_after),
+        paths_blocked_count=result.paths_blocked_count,
+        blocked_paths=_to_out(result.blocked_paths, graph_before),
+        still_open_paths=_to_out(result.still_open_paths, graph_before),
+    )
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+# ----------------------------------------------------------------------
+# Phase 13 — AI analysis endpoints.
+#
+# These operate on a REAL persisted attack_path_id from Postgres (i.e.
+# a scan run via /api/v1/scans/async), not the ordinal "path-001" ids
+# the in-memory list endpoint above uses — AIAnalysisModel needs a real
+# foreign key to attach to. See docs/PHASE13-16_NOTES.md.
+# ----------------------------------------------------------------------
+@app.post("/api/v1/attack-paths/{attack_path_id}/analyze", response_model=AttackPathAnalysisOut)
+def analyze_attack_path(attack_path_id: str) -> AttackPathAnalysisOut:
+    from backend.ai_service import AIAnalysisService, AttackPathNotFoundError, NoProviderConfiguredError
+    from backend.db import models
+    from backend.db.session import SessionLocal
+
+    session = SessionLocal()
+    try:
+        ai_service = AIAnalysisService(session=session)
+        try:
+            analysis = ai_service.analyze(attack_path_id)
+        except AttackPathNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except NoProviderConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        row = session.query(models.AIAnalysisModel).filter_by(attack_path_id=attack_path_id).one()
+        return AttackPathAnalysisOut(**analysis.model_dump(), model_used=row.model_used)
+    finally:
+        session.close()
+
+
+@app.get("/api/v1/attack-paths/{attack_path_id}/analysis", response_model=AttackPathAnalysisOut)
+def get_attack_path_analysis(attack_path_id: str) -> AttackPathAnalysisOut:
+    from backend.ai_service import AIAnalysisService
+    from backend.db import models
+    from backend.db.session import SessionLocal
+
+    session = SessionLocal()
+    try:
+        ai_service = AIAnalysisService(session=session)
+        analysis = ai_service.get_existing(attack_path_id)
+        if analysis is None:
+            raise HTTPException(status_code=404, detail="No AI analysis exists yet for this attack path")
+        row = session.query(models.AIAnalysisModel).filter_by(attack_path_id=attack_path_id).one()
+        return AttackPathAnalysisOut(**analysis.model_dump(), model_used=row.model_used)
+    finally:
+        session.close()
