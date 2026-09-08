@@ -54,7 +54,9 @@ class ScanService:
     def __init__(self, store: InMemoryScanStore | None = None):
         self.store = store or InMemoryScanStore()
 
-    def run_scan(self, region: str = "us-east-1", crown_jewel_ids: list[str] | None = None) -> ScanRecord:
+    def run_scan(
+        self, region: str = "us-east-1", crown_jewel_ids: list[str] | None = None, scan_id: str | None = None
+    ) -> ScanRecord:
         provider = AWSProvider(region=region)
 
         scan_result = provider.discover_assets()
@@ -82,7 +84,7 @@ class ScanService:
         scored_paths.sort(key=lambda pair: pair[1].risk_score, reverse=True)
 
         record = ScanRecord(
-            scan_id=str(uuid.uuid4()),
+            scan_id=scan_id or str(uuid.uuid4()),
             scan_result=scan_result,
             graph_engine=graph_engine,
             attack_paths=scored_paths,

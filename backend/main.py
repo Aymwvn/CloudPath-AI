@@ -1,14 +1,15 @@
 """
 Phase 8 — FastAPI backend (MVP subset of ARCHITECTURE.md Section 27).
+Phase 10 adds an async scan path backed by Celery + Postgres alongside
+the original synchronous/in-memory one (kept for local demo use and to
+avoid breaking anything the Phase 8 test suite already depends on).
 
-Only the endpoints needed to exercise phases 1-7 end to end are
-implemented here. Auth/RBAC (Section 31), PostgreSQL persistence
-(Section 16), and background job workers (Section 30) are explicitly
-deferred to later phases — this backend runs scans synchronously and
-in-memory, which is fine for local/demo use but is NOT the final
-architecture.
+Auth/RBAC (Section 31) is still explicitly deferred to a later
+hardening phase.
 """
 from __future__ import annotations
+
+import uuid
 
 from fastapi import FastAPI, HTTPException
 
@@ -23,11 +24,27 @@ from backend.schemas import (
 )
 
 app = FastAPI(title="CloudPath AI", version="0.1.0-mvp")
-service = ScanService()
+service = ScanService()  # in-memory, synchronous — Phase 8 behavior, unchanged
+
+
+def _postgres_store():
+    """Lazily build a PostgresScanStore. Returns None if Postgres isn't
+    reachable/configured, so environments without it (e.g. Phase 8's own
+    test run) don't break — only the new async endpoints depend on this."""
+    try:
+        from backend.db.session import SessionLocal
+        from backend.db.store import PostgresScanStore
+
+        return PostgresScanStore(session_factory=SessionLocal)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 @app.post("/api/v1/scans", response_model=ScanSummary)
 def create_scan(request: ScanRequest) -> ScanSummary:
+    """Synchronous scan (Phase 8 behavior) — blocks until done, in-memory
+    only. Kept for local/demo use. For real usage prefer
+    POST /api/v1/scans/async (Phase 10)."""
     try:
         record = service.run_scan(region=request.region, crown_jewel_ids=request.crown_jewel_ids)
     except Exception as exc:  # noqa: BLE001
@@ -43,9 +60,43 @@ def create_scan(request: ScanRequest) -> ScanSummary:
     )
 
 
+@app.post("/api/v1/scans/async", response_model=ScanSummary, status_code=202)
+def create_scan_async(request: ScanRequest) -> ScanSummary:
+    """Phase 10 — returns immediately with status 'pending'; the real
+    work happens in a Celery worker (backend/tasks/scan_tasks.py) and
+    persists to Postgres. Poll GET /api/v1/scans/{scan_id} for status."""
+    store = _postgres_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Postgres not configured/reachable for async scans")
+
+    from backend.tasks.scan_tasks import run_scan_task
+
+    scan_id = str(uuid.uuid4())
+    store.create_pending_job(scan_id)
+    run_scan_task.delay(scan_id, request.region, request.crown_jewel_ids)
+
+    return ScanSummary(
+        scan_id=scan_id,
+        account_id="",
+        status="pending",
+        asset_count=0,
+        relationship_count=0,
+        errors=[],
+    )
+
+
 @app.get("/api/v1/scans/{scan_id}", response_model=ScanSummary)
 def get_scan(scan_id: str) -> ScanSummary:
+    # check the in-memory (synchronous) store first, then fall back to
+    # Postgres for scans kicked off via the async endpoint
     record = service.store.get(scan_id)
+    if not record:
+        pg = _postgres_store()
+        if pg is not None:
+            try:
+                record = pg.get(scan_id)
+            except Exception:  # noqa: BLE001 - Postgres down/unreachable at query time, not just construction
+                record = None
     if not record:
         raise HTTPException(status_code=404, detail="Scan not found")
     return ScanSummary(
