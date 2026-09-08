@@ -111,6 +111,16 @@ class IAMAnalyzer:
 
             for principal_arn in aws_principals:
                 source_id = self._principal_to_asset_id(principal_arn, asset.account_id)
+                # NOTE: only CAN_ASSUME is emitted here, not a separate
+                # TRUSTS edge for the same (source, target) pair. The graph
+                # engine (Phase 5) uses a plain DiGraph, which can only
+                # hold one edge between a given node pair — a second edge
+                # type added for the same pair silently overwrites the
+                # first. CAN_ASSUME already conveys this trust relationship
+                # for attack-path traversal purposes, so a duplicate TRUSTS
+                # edge here would just collide with it and lose data. See
+                # docs/PHASE13-16_NOTES.md for the full writeup — this was
+                # caught by Phase 16's synthetic scenario tests.
                 rels.append(
                     Relationship(
                         source_id=source_id,
@@ -120,19 +130,14 @@ class IAMAnalyzer:
                         confidence=1.0 if source_id in roles_by_id or source_id.startswith("aws:account/") else 0.7,
                     )
                 )
-                rels.append(
-                    Relationship(
-                        source_id=source_id,
-                        target_id=asset.id,
-                        type=EdgeType.TRUSTS,
-                        evidence={"trust_statement": statement.raw},
-                    )
-                )
 
             service_principals = principal.get("Service") if isinstance(principal, dict) else None
             if service_principals:
                 # service-linked trust (e.g. ec2.amazonaws.com, lambda.amazonaws.com)
-                # recorded as evidence but not turned into a graph node
+                # recorded as evidence but not turned into a graph node.
+                # No CAN_ASSUME collision risk here since service principals
+                # never get a CAN_ASSUME edge (they're not assumable identities
+                # in our graph), so TRUSTS is the only edge for this pair.
                 rels.append(
                     Relationship(
                         source_id=f"aws:service/{service_principals if isinstance(service_principals, str) else service_principals[0]}",
