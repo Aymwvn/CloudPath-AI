@@ -1,0 +1,29 @@
+# Backend API container. Non-root user, minimal base image, no build
+# tools left in the final layer (ARCHITECTURE.md Section 31: "Non-root
+# Docker containers, Minimal capabilities").
+FROM python:3.12-slim AS base
+
+# System deps needed only to BUILD psycopg2 — removed after install so
+# they don't sit in the final image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create a dedicated non-root user — never run the API as root
+RUN useradd --create-home --shell /usr/sbin/nologin appuser
+
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
