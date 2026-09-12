@@ -14,3 +14,4 @@ redis>=5.0
 fakeredis>=2.21
 anthropic>=0.34
 openai>=1.30
+python-multipart>=0.0.9

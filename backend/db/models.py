@@ -185,3 +185,29 @@ class MitreTechniqueModel(Base):
     technique_name = Column(String, nullable=False)
     evidence = Column(JSON, default=dict)
     confidence = Column(Float, default=1.0)
+
+
+class UserModel(Base):
+    """Phase 18 — authenticated users with RBAC roles."""
+
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    username = Column(String, nullable=False, unique=True)
+    hashed_password = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="viewer")  # "viewer" | "analyst" | "admin"
+    created_at = Column(DateTime, default=_now)
+    is_active = Column(Boolean, default=True)
+
+
+class AuditLogModel(Base):
+    """Phase 18 — records every authenticated action for accountability."""
+
+    __tablename__ = "audit_logs"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    actor = Column(String, nullable=False)  # username, or "anonymous" for failed-auth attempts
+    action = Column(String, nullable=False)  # e.g. "scan.create", "auth.login", "auth.login_failed"
+    target = Column(String, nullable=True)  # e.g. a scan_id or attack_path_id
+    details = Column(JSON, default=dict)
+    timestamp = Column(DateTime, default=_now)

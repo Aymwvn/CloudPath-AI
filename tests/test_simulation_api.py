@@ -6,10 +6,17 @@ import boto3
 from fastapi.testclient import TestClient
 from moto import mock_aws
 
+import uuid
+
+from backend.auth import create_access_token
 from backend.main import app, service
 from backend.scan_service import InMemoryScanStore
 
 client = TestClient(app)
+# Unique per test run — see the comment in test_backend_api.py for why
+# a fixed username breaks against the real Redis-backed rate limiter.
+_TEST_USERNAME = f"test-analyst-{uuid.uuid4().hex[:8]}"
+ANALYST_HEADERS = {"Authorization": f"Bearer {create_access_token(_TEST_USERNAME, 'analyst')}"}
 
 
 def _seed_escalation_scenario():
@@ -50,10 +57,10 @@ class TestSimulationAPI:
     @mock_aws
     def test_simulation_endpoint_returns_before_after_counts(self):
         _seed_escalation_scenario()
-        scan_resp = client.post("/api/v1/scans", json={"region": "us-east-1"})
+        scan_resp = client.post("/api/v1/scans", json={"region": "us-east-1"}, headers=ANALYST_HEADERS)
         scan_id = scan_resp.json()["scan_id"]
 
-        paths_resp = client.get(f"/api/v1/attack-paths?scan_id={scan_id}")
+        paths_resp = client.get(f"/api/v1/attack-paths?scan_id={scan_id}", headers=ANALYST_HEADERS)
         paths = paths_resp.json()
 
         pass_role_steps = [
@@ -69,6 +76,7 @@ class TestSimulationAPI:
             sim_resp = client.post(
                 "/api/v1/simulation",
                 json={"scan_id": scan_id, "remove_edges": [{"source_id": "a", "target_id": "b", "edge_type": "TRUSTS"}]},
+                headers=ANALYST_HEADERS,
             )
             assert sim_resp.status_code == 200
             return
@@ -82,6 +90,7 @@ class TestSimulationAPI:
                     {"source_id": step["source"], "target_id": step["target"], "edge_type": "CAN_PASS_ROLE"}
                 ],
             },
+            headers=ANALYST_HEADERS,
         )
         assert sim_resp.status_code == 200
         body = sim_resp.json()
@@ -91,5 +100,13 @@ class TestSimulationAPI:
         resp = client.post(
             "/api/v1/simulation",
             json={"remove_edges": [{"source_id": "a", "target_id": "b", "edge_type": "TRUSTS"}]},
+            headers=ANALYST_HEADERS,
         )
         assert resp.status_code == 404
+
+    def test_simulation_without_auth_is_rejected(self):
+        resp = client.post(
+            "/api/v1/simulation",
+            json={"remove_edges": [{"source_id": "a", "target_id": "b", "edge_type": "TRUSTS"}]},
+        )
+        assert resp.status_code == 401

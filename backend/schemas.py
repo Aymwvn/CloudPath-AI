@@ -9,6 +9,23 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+
+
+class UserCreateIn(BaseModel):
+    username: str
+    password: str
+    role: str = "viewer"
+
+
+class UserOut(BaseModel):
+    username: str
+    role: str
+
+
 class ScanRequest(BaseModel):
     region: str = "us-east-1"
     crown_jewel_ids: list[str] = []

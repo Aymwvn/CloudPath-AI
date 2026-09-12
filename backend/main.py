@@ -1,18 +1,28 @@
 """
 Phase 8 — FastAPI backend (MVP subset of ARCHITECTURE.md Section 27).
-Phase 10 adds an async scan path backed by Celery + Postgres alongside
-the original synchronous/in-memory one (kept for local demo use and to
-avoid breaking anything the Phase 8 test suite already depends on).
-
-Auth/RBAC (Section 31) is still explicitly deferred to a later
-hardening phase.
+Phase 10 adds an async scan path backed by Celery + Postgres.
+Phase 18 adds JWT authentication, RBAC, rate limiting, and audit
+logging (ARCHITECTURE.md Section 31) — every mutating endpoint and every
+read of scan data now requires a valid bearer token.
 """
 from __future__ import annotations
 
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
 
+from backend.auth import (
+    CurrentUser,
+    create_access_token,
+    get_current_user,
+    get_db,
+    require_role,
+    verify_password,
+    write_audit_log,
+)
+from backend.rate_limit import scan_rate_limiter
 from backend.scan_service import ScanService
 from backend.schemas import (
     AssetOut,
@@ -26,6 +36,9 @@ from backend.schemas import (
     SimulationRequest,
     SimulationResultOut,
     StatisticsOut,
+    TokenOut,
+    UserCreateIn,
+    UserOut,
 )
 
 app = FastAPI(title="CloudPath AI", version="0.1.0-mvp")
@@ -45,15 +58,63 @@ def _postgres_store():
         return None
 
 
+# ----------------------------------------------------------------------
+# Phase 18 — auth endpoints
+# ----------------------------------------------------------------------
+@app.post("/api/v1/auth/login", response_model=TokenOut)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> TokenOut:
+    from backend.db import models
+
+    user = db.query(models.UserModel).filter_by(username=form_data.username).one_or_none()
+    if not user or not user.is_active or not verify_password(form_data.password, user.hashed_password):
+        write_audit_log(db, actor=form_data.username, action="auth.login_failed")
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    write_audit_log(db, actor=user.username, action="auth.login")
+    token = create_access_token(username=user.username, role=user.role)
+    return TokenOut(access_token=token, token_type="bearer", role=user.role)
+
+
+@app.post("/api/v1/auth/register", response_model=UserOut)
+def register_user(
+    request: UserCreateIn,
+    db: Session = Depends(get_db),
+    admin: CurrentUser = Depends(require_role("admin")),
+) -> UserOut:
+    """Admin-only — bootstrapping the FIRST admin user can't go through
+    this endpoint (nothing to authenticate as yet); use
+    scripts/create_admin.py for that one-time setup instead."""
+    from backend.db import models
+    from backend.auth import hash_password
+
+    existing = db.query(models.UserModel).filter_by(username=request.username).one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    user = models.UserModel(username=request.username, hashed_password=hash_password(request.password), role=request.role)
+    db.add(user)
+    db.commit()
+    write_audit_log(db, actor=admin.username, action="user.create", target=user.username, details={"role": request.role})
+    return UserOut(username=user.username, role=user.role)
+
+
 @app.post("/api/v1/scans", response_model=ScanSummary)
-def create_scan(request: ScanRequest) -> ScanSummary:
+def create_scan(
+    request: ScanRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_role("analyst")),
+    _rate_limit: None = Depends(scan_rate_limiter()),
+) -> ScanSummary:
     """Synchronous scan (Phase 8 behavior) — blocks until done, in-memory
     only. Kept for local/demo use. For real usage prefer
-    POST /api/v1/scans/async (Phase 10)."""
+    POST /api/v1/scans/async (Phase 10). Requires 'analyst' role or
+    higher; rate-limited to 10 scans/hour per user (Phase 18)."""
     try:
         record = service.run_scan(region=request.region, crown_jewel_ids=request.crown_jewel_ids)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Scan failed: {exc}") from exc
+
+    write_audit_log(db, actor=user.username, action="scan.create", target=record.scan_id, details={"region": request.region})
 
     return ScanSummary(
         scan_id=record.scan_id,
@@ -66,7 +127,12 @@ def create_scan(request: ScanRequest) -> ScanSummary:
 
 
 @app.post("/api/v1/scans/async", response_model=ScanSummary, status_code=202)
-def create_scan_async(request: ScanRequest) -> ScanSummary:
+def create_scan_async(
+    request: ScanRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_role("analyst")),
+    _rate_limit: None = Depends(scan_rate_limiter()),
+) -> ScanSummary:
     """Phase 10 — returns immediately with status 'pending'; the real
     work happens in a Celery worker (backend/tasks/scan_tasks.py) and
     persists to Postgres. Poll GET /api/v1/scans/{scan_id} for status."""
@@ -79,6 +145,7 @@ def create_scan_async(request: ScanRequest) -> ScanSummary:
     scan_id = str(uuid.uuid4())
     store.create_pending_job(scan_id)
     run_scan_task.delay(scan_id, request.region, request.crown_jewel_ids)
+    write_audit_log(db, actor=user.username, action="scan.create_async", target=scan_id, details={"region": request.region})
 
     return ScanSummary(
         scan_id=scan_id,
@@ -91,7 +158,7 @@ def create_scan_async(request: ScanRequest) -> ScanSummary:
 
 
 @app.get("/api/v1/scans/{scan_id}", response_model=ScanSummary)
-def get_scan(scan_id: str) -> ScanSummary:
+def get_scan(scan_id: str, user: CurrentUser = Depends(get_current_user)) -> ScanSummary:
     # check the in-memory (synchronous) store first, then fall back to
     # Postgres for scans kicked off via the async endpoint
     record = service.store.get(scan_id)
@@ -115,7 +182,7 @@ def get_scan(scan_id: str) -> ScanSummary:
 
 
 @app.get("/api/v1/assets", response_model=list[AssetOut])
-def list_assets(scan_id: str | None = None) -> list[AssetOut]:
+def list_assets(scan_id: str | None = None, user: CurrentUser = Depends(get_current_user)) -> list[AssetOut]:
     record = service.store.get(scan_id) if scan_id else service.store.latest()
     if not record:
         raise HTTPException(status_code=404, detail="No scan available")
@@ -126,7 +193,7 @@ def list_assets(scan_id: str | None = None) -> list[AssetOut]:
 
 
 @app.get("/api/v1/attack-paths", response_model=list[AttackPathOut])
-def list_attack_paths(scan_id: str | None = None) -> list[AttackPathOut]:
+def list_attack_paths(scan_id: str | None = None, user: CurrentUser = Depends(get_current_user)) -> list[AttackPathOut]:
     record = service.store.get(scan_id) if scan_id else service.store.latest()
     if not record:
         raise HTTPException(status_code=404, detail="No scan available")
@@ -151,7 +218,7 @@ def list_attack_paths(scan_id: str | None = None) -> list[AttackPathOut]:
 
 
 @app.get("/api/v1/statistics", response_model=StatisticsOut)
-def get_statistics(scan_id: str | None = None) -> StatisticsOut:
+def get_statistics(scan_id: str | None = None, user: CurrentUser = Depends(get_current_user)) -> StatisticsOut:
     record = service.store.get(scan_id) if scan_id else service.store.latest()
     if not record:
         raise HTTPException(status_code=404, detail="No scan available")
@@ -170,7 +237,7 @@ def get_statistics(scan_id: str | None = None) -> StatisticsOut:
 
 
 @app.get("/api/v1/attack-paths/{attack_path_id}/mitre")
-def get_mitre_mappings(attack_path_id: str) -> list[dict]:
+def get_mitre_mappings(attack_path_id: str, user: CurrentUser = Depends(get_current_user)) -> list[dict]:
     """Phase 14 — deterministic MITRE ATT&CK mappings, computed at scan
     persist time (backend/db/store.py), not by the AI layer."""
     from backend.db import models
@@ -193,7 +260,7 @@ def get_mitre_mappings(attack_path_id: str) -> list[dict]:
 
 
 @app.post("/api/v1/simulation", response_model=SimulationResultOut)
-def run_simulation(request: SimulationRequest) -> SimulationResultOut:
+def run_simulation(request: SimulationRequest, user: CurrentUser = Depends(require_role("analyst"))) -> SimulationResultOut:
     """Phase 15 — what-if analysis. Removes the given edges from a copy
     of the graph and shows which attack paths get blocked. Pure
     simulation — never touches real cloud infrastructure."""
@@ -206,7 +273,6 @@ def run_simulation(request: SimulationRequest) -> SimulationResultOut:
     removals = [EdgeRemoval(source_id=e.source_id, target_id=e.target_id, edge_type=e.edge_type) for e in request.remove_edges]
     result = WhatIfSimulator().simulate(record.scan_result, removals)
 
-    risk_engine_for_before = None
     from engine.risk.engine import RiskEngine
     from engine.graph.builder import GraphEngine
 
@@ -235,6 +301,7 @@ def run_simulation(request: SimulationRequest) -> SimulationResultOut:
 
 @app.get("/health")
 def health() -> dict:
+    # deliberately unauthenticated — standard practice for liveness probes
     return {"status": "ok"}
 
 
@@ -247,7 +314,7 @@ def health() -> dict:
 # foreign key to attach to. See docs/PHASE13-16_NOTES.md.
 # ----------------------------------------------------------------------
 @app.post("/api/v1/attack-paths/{attack_path_id}/analyze", response_model=AttackPathAnalysisOut)
-def analyze_attack_path(attack_path_id: str) -> AttackPathAnalysisOut:
+def analyze_attack_path(attack_path_id: str, user: CurrentUser = Depends(require_role("analyst"))) -> AttackPathAnalysisOut:
     from backend.ai_service import AIAnalysisService, AttackPathNotFoundError, NoProviderConfiguredError
     from backend.db import models
     from backend.db.session import SessionLocal
@@ -263,13 +330,14 @@ def analyze_attack_path(attack_path_id: str) -> AttackPathAnalysisOut:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         row = session.query(models.AIAnalysisModel).filter_by(attack_path_id=attack_path_id).one()
+        write_audit_log(session, actor=user.username, action="attack_path.analyze", target=attack_path_id)
         return AttackPathAnalysisOut(**analysis.model_dump(), model_used=row.model_used)
     finally:
         session.close()
 
 
 @app.get("/api/v1/attack-paths/{attack_path_id}/analysis", response_model=AttackPathAnalysisOut)
-def get_attack_path_analysis(attack_path_id: str) -> AttackPathAnalysisOut:
+def get_attack_path_analysis(attack_path_id: str, user: CurrentUser = Depends(get_current_user)) -> AttackPathAnalysisOut:
     from backend.ai_service import AIAnalysisService
     from backend.db import models
     from backend.db.session import SessionLocal
