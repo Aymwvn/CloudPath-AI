@@ -6,7 +6,7 @@
 
 CloudPath AI is a defensive, open-source cloud security platform. Instead of reporting cloud misconfigurations as an isolated flat list (the way most scanners do), it builds a graph of your cloud environment, finds the actual chains an attacker could walk from the internet to your sensitive data, ranks those paths by real risk, and uses AI **only** to explain findings a deterministic engine already discovered — never to invent them.
 
-**Project status: 18 of 20 planned phases complete.** See [Roadmap](#roadmap) below for exactly what's built vs. still planned. This is an active work-in-progress, not a finished v1.0 — read this README for what actually exists today, not what the original design aspired to.
+**Project status: v1.0.0 — all 20 planned phases complete.** See [`CHANGELOG.md`](CHANGELOG.md) for the full release history and [Roadmap](#roadmap) below for what's built vs. known gaps beyond the original plan — this is a v1.0 with honestly-documented limitations, not a claim of completeness.
 
 ---
 
@@ -45,6 +45,8 @@ The deterministic graph/security engine discovers attack paths. AI only explains
 | Benchmarking harness | ✅ | `benchmarks/` |
 | Auth, RBAC, rate limiting, audit logs | ✅ | `backend/auth.py`, `backend/rate_limit.py` |
 | Docker hardening | ⚠️ built, **not verified by execution** — see `docs/PHASE18_NOTES.md` |
+| Documentation (README, SECURITY, CONTRIBUTING) | ✅ | this file, `SECURITY.md`, `CONTRIBUTING.md` |
+| **v1.0.0 release** | ✅ | see `CHANGELOG.md` |
 | Standalone `cloudpath` CLI | ❌ not built — `scripts/run_scan_demo.py` is a demo script only, not the full CLI described in the original design |
 | Lambda / RDS / Secrets Manager / KMS collection | ❌ not built (explicit post-MVP scope) |
 | Interactive attack graph visualization (React Flow) | ❌ not built — dashboard currently shows list/table views only |
@@ -172,10 +174,9 @@ See [`SECURITY.md`](SECURITY.md) for the full threat model, RBAC design, and vul
 
 ## Roadmap
 
-**Done:** Phases 1–18 (see table above).
-**Remaining:**
-- Phase 19 — this documentation pass (in progress)
-- Phase 20 — v1.0 release
+**All 20 originally-planned phases are complete as of v1.0.0** — see
+[`CHANGELOG.md`](CHANGELOG.md) for the full phase-by-phase history and
+every real bug caught and fixed along the way.
 
 **Known gaps beyond the original 20-phase plan** (not hidden, tracked honestly): standalone CLI, Lambda/RDS/Secrets/KMS collection, interactive attack graph UI, multi-cloud support, tenant isolation enforcement, JWT revocation. See each phase's `docs/PHASE*_NOTES.md` for the specific limitations recorded at the time that phase was built.
 

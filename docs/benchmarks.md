@@ -1,7 +1,7 @@
 # CloudPath AI — Benchmark Results
 
-Generated: 2026-09-09T10:57:22.953796+00:00
-Python: 3.12.3 on Linux 6.18.44-fc-v24
+Generated: 2026-09-11T00:25:34.273534+00:00
+Python: 3.12.3 on Linux 6.18.44-fc-v32
 
 Reproduce with `python -m benchmarks.run_benchmark`. No Postgres, Redis, or real LLM API key required — this exercises the pure engine layer plus a mock AI provider.
 
@@ -9,7 +9,7 @@ Reproduce with `python -m benchmarks.run_benchmark`. No Postgres, Redis, or real
 
 | Scenario | Path P/R/F1 | Finding P/R/F1 | MITRE P/R/F1 | Time (s) |
 |---|---|---|---|---|
-| public_ec2_to_s3 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 0.4ms |
+| public_ec2_to_s3 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 0.3ms |
 | pass_role_escalation | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 0.3ms |
 | public_bucket | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 0.1ms |
 | open_security_group | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 1.00/1.00/1.00 | 0.0ms |
@@ -19,7 +19,7 @@ Reproduce with `python -m benchmarks.run_benchmark`. No Postgres, Redis, or real
 - Attack path F1: **1.00**
 - Finding detection F1: **1.00**
 - MITRE mapping F1: **1.00**
-- Total pipeline time across all scenarios: **0.9ms**
+- Total pipeline time across all scenarios: **0.7ms**
 
 ## AI hallucination check
 

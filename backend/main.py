@@ -41,7 +41,7 @@ from backend.schemas import (
     UserOut,
 )
 
-app = FastAPI(title="CloudPath AI", version="0.1.0-mvp")
+app = FastAPI(title="CloudPath AI", version="1.0.0")
 service = ScanService()  # in-memory, synchronous — Phase 8 behavior, unchanged
 
 
