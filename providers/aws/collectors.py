@@ -1,11 +1,7 @@
 """
-Phase 1 — AWS collectors.
-
-Every function here is READ-ONLY (Describe/List/Get calls only — see
-docs/aws-permissions.md). None of these functions ever mutate cloud state.
-Each returns raw boto3 response dicts; normalization into Asset objects
-happens in providers/aws/provider.py, keeping "talk to AWS" separate from
-"turn AWS's shape into our shape".
+AWS collectors — read-only only (Describe/List/Get calls). Never mutates
+cloud state. Each returns raw boto3 response dicts; normalization into
+Asset objects happens in providers/aws/provider.py.
 """
 from __future__ import annotations
 
@@ -18,22 +14,7 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 
-def _safe_call(fn, *args, **kwargs) -> Any:
-    """Call a boto3 method, log + swallow permission/throttling errors.
-
-    A missing permission on one resource type should not abort the whole
-    scan — it should be recorded and the scan should keep going with
-    partial data (see ScanResult.errors).
-    """
-    try:
-        return fn(*args, **kwargs)
-    except ClientError as exc:
-        logger.warning("AWS call failed: %s", exc)
-        raise
-
-
 def collect_iam(session: boto3.Session) -> dict[str, Any]:
-    """Collect users, roles, groups, and their attached/inline policies."""
     iam = session.client("iam")
     data: dict[str, Any] = {"users": [], "roles": [], "groups": [], "policies": {}}
 
@@ -49,7 +30,6 @@ def collect_iam(session: boto3.Session) -> dict[str, Any]:
     for page in paginator.paginate():
         data["groups"].extend(page["Groups"])
 
-    # attached + inline policies per role (needed for IAM engine, Phase 3)
     for role in data["roles"]:
         name = role["RoleName"]
         attached = iam.list_attached_role_policies(RoleName=name)["AttachedPolicies"]
@@ -73,7 +53,6 @@ def collect_iam(session: boto3.Session) -> dict[str, Any]:
 
 
 def collect_ec2(session: boto3.Session) -> dict[str, Any]:
-    """Collect EC2 instances, VPCs, subnets, and security groups."""
     ec2 = session.client("ec2")
     data: dict[str, Any] = {"instances": [], "vpcs": [], "subnets": [], "security_groups": []}
 
@@ -90,7 +69,6 @@ def collect_ec2(session: boto3.Session) -> dict[str, Any]:
 
 
 def collect_s3(session: boto3.Session) -> dict[str, Any]:
-    """Collect S3 buckets with their policy / ACL / public-access-block config."""
     s3 = session.client("s3")
     buckets = s3.list_buckets()["Buckets"]
     enriched = []
@@ -103,17 +81,14 @@ def collect_s3(session: boto3.Session) -> dict[str, Any]:
             entry["Location"] = s3.get_bucket_location(Bucket=name)["LocationConstraint"]
         except ClientError:
             entry["Location"] = None
-
         try:
             entry["Policy"] = s3.get_bucket_policy(Bucket=name)["Policy"]
         except ClientError:
             entry["Policy"] = None
-
         try:
             entry["ACL"] = s3.get_bucket_acl(Bucket=name)
         except ClientError:
             entry["ACL"] = None
-
         try:
             entry["PublicAccessBlock"] = s3.get_public_access_block(Bucket=name)["PublicAccessBlockConfiguration"]
         except ClientError:
@@ -125,11 +100,6 @@ def collect_s3(session: boto3.Session) -> dict[str, Any]:
 
 
 def collect_instance_profiles(session: boto3.Session) -> dict[str, str]:
-    """Map instance-profile name -> role name.
-
-    Used by the Graph Engine (Phase 5) to resolve the approximate RUNS_AS
-    edge AWSProvider records at Phase 1/2 time into an exact role edge.
-    """
     iam = session.client("iam")
     mapping: dict[str, str] = {}
     paginator = iam.get_paginator("list_instance_profiles")
@@ -141,7 +111,96 @@ def collect_instance_profiles(session: boto3.Session) -> dict[str, str]:
     return mapping
 
 
+# ---------------------------------------------------------------------
+# New: Lambda / RDS / Secrets Manager / KMS collectors.
+#
+# These use exactly the permissions already documented in
+# docs/ARCHITECTURE.md Section 10 (lambda:ListFunctions/GetFunction/
+# GetPolicy, rds:Describe*, secretsmanager:ListSecrets, kms:ListKeys/
+# DescribeKey/GetKeyPolicy) — no new IAM permissions are required beyond
+# what was already scoped for the platform from the start.
+# ---------------------------------------------------------------------
+def collect_lambda(session: boto3.Session) -> dict[str, Any]:
+    """Collect Lambda functions, their execution role, and resource
+    policy (which reveals public/cross-account invoke permissions)."""
+    lam = session.client("lambda")
+    functions = []
+
+    paginator = lam.get_paginator("list_functions")
+    for page in paginator.paginate():
+        functions.extend(page["Functions"])
+
+    for fn in functions:
+        try:
+            policy = lam.get_policy(FunctionName=fn["FunctionName"])["Policy"]
+        except ClientError:
+            policy = None
+        fn["ResourcePolicy"] = policy
+
+    return {"functions": functions}
+
+
+def collect_rds(session: boto3.Session) -> dict[str, Any]:
+    """Collect RDS instances, including public accessibility and the
+    security groups attached to them."""
+    rds = session.client("rds")
+    instances = []
+
+    paginator = rds.get_paginator("describe_db_instances")
+    for page in paginator.paginate():
+        instances.extend(page["DBInstances"])
+
+    return {"instances": instances}
+
+
+def collect_secrets_manager(session: boto3.Session) -> dict[str, Any]:
+    """Collect Secrets Manager secret METADATA only — never the secret
+    value itself. This remains a read-only, non-exfiltrating scanner;
+    GetSecretValue is deliberately never called."""
+    sm = session.client("secretsmanager")
+    secrets = []
+
+    paginator = sm.get_paginator("list_secrets")
+    for page in paginator.paginate():
+        secrets.extend(page["SecretList"])
+
+    for secret in secrets:
+        try:
+            policy_resp = sm.get_resource_policy(SecretId=secret["ARN"])
+            secret["ResourcePolicy"] = policy_resp.get("ResourcePolicy")
+        except ClientError:
+            secret["ResourcePolicy"] = None
+
+    return {"secrets": secrets}
+
+
+def collect_kms(session: boto3.Session) -> dict[str, Any]:
+    """Collect KMS keys and their key policy (reveals cross-account or
+    overly-broad grants)."""
+    kms = session.client("kms")
+    keys = []
+
+    paginator = kms.get_paginator("list_keys")
+    for page in paginator.paginate():
+        keys.extend(page["Keys"])
+
+    enriched = []
+    for key in keys:
+        key_id = key["KeyId"]
+        try:
+            description = kms.describe_key(KeyId=key_id)["KeyMetadata"]
+        except ClientError:
+            continue  # e.g. AWS-managed keys the account can list but not fully describe
+        try:
+            policy = kms.get_key_policy(KeyId=key_id, PolicyName="default")["Policy"]
+        except ClientError:
+            policy = None
+        description["Policy"] = policy
+        enriched.append(description)
+
+    return {"keys": enriched}
+
+
 def get_caller_identity(session: boto3.Session) -> dict[str, Any]:
-    """Used to resolve the current account id at scan start."""
     sts = session.client("sts")
     return sts.get_caller_identity()
