@@ -1,14 +1,3 @@
-# ARCHITECTURE.md Section 36 deployment + Section 31 hardening:
-# non-root containers (in each Dockerfile), resource limits below,
-# and network isolation — postgres/redis are on an internal-only
-# network with no host port mapping; only backend and frontend are
-# reachable from outside.
-#
-# Before first run: copy .env.example to .env and set real values,
-# especially JWT_SECRET_KEY and POSTGRES_PASSWORD. Then bootstrap the
-# first admin user (see README.md) with:
-#   docker compose exec backend python scripts/create_admin.py --username admin
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -31,8 +20,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # No "ports:" mapping — deliberately unreachable from the host or
-    # outside the internal network, only backend/worker can reach it.
 
   redis:
     image: redis:7-alpine
@@ -49,7 +36,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # No "ports:" mapping — same isolation reasoning as postgres.
 
   backend:
     build:
@@ -100,7 +86,6 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
-    # No "ports:" — the worker has no HTTP surface at all.
 
   frontend:
     build:
@@ -120,11 +105,8 @@ services:
           memory: 128M
 
 networks:
-  # postgres/redis/worker live here only — never exposed to "public"
   internal:
     internal: true
-  # backend and frontend are reachable from outside; backend also
-  # bridges into "internal" so it can reach postgres/redis
   public:
 
 volumes:

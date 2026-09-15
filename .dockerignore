@@ -1,0 +1,32 @@
+# Never leak real secrets into a build context/image layer
+.env
+*.pem
+*.key
+
+# Git metadata — never needed inside a container
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node — critical: prevents the host's node_modules (built for the
+# host's OS/architecture) from being copied into the Linux container,
+# which would silently break any native dependency and also just
+# bloats the build context enormously for no reason.
+frontend/node_modules/
+frontend/dist/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Docs/tests aren't needed inside the runtime image
+docs/
+tests/
+*.md
