@@ -1,14 +1,9 @@
 """
-Phase 4 — Network analyzer.
-
-Consumes normalized Asset objects (security groups, S3 buckets, EC2) and:
-  1. Flags overly-broad security group rules (0.0.0.0/0 on sensitive ports).
-  2. Determines TRUE S3 bucket public-ness by actually parsing the bucket
-     policy document (not just the coarse PublicAccessBlock flag set by
-     AWSProvider in Phase 1 — that flag is a fast pre-filter, this module
-     does the real determination).
-  3. Emits EXPOSED_TO relationships from Internet to anything it confirms
-     is genuinely reachable.
+Network analyzer. Flags overly-broad security group rules, determines
+real S3 bucket public-ness, and (new) derives CONNECTED_TO edges from
+security-group-to-security-group reachability rules — e.g. a DB
+security group that allows inbound from a web security group means any
+resource using the web SG can reach any resource using the DB SG.
 """
 from __future__ import annotations
 
@@ -18,9 +13,6 @@ from dataclasses import dataclass, field
 from engine.iam import policy_eval
 from engine.models import Asset, EdgeType, NodeType, Relationship
 
-# Ports worth calling out specifically when open to 0.0.0.0/0 — this is a
-# starting set, not exhaustive; anything not in here still gets flagged at
-# "medium" if it's a wide-open rule, just without the specific port callout.
 SENSITIVE_PORTS = {
     22: "SSH",
     3389: "RDP",
@@ -37,7 +29,7 @@ WIDE_OPEN_CIDRS = {"0.0.0.0/0", "::/0"}
 @dataclass
 class NetworkFinding:
     asset_id: str
-    category: str  # "open_security_group" | "public_s3_bucket"
+    category: str
     severity: str
     detail: str
     evidence: dict = field(default_factory=dict)
@@ -55,6 +47,8 @@ class NetworkAnalyzer:
                 f, r = self._analyze_s3_bucket(asset)
                 findings.extend(f)
                 relationships.extend(r)
+
+        relationships.extend(self._derive_sg_to_sg_connectivity(assets))
 
         return findings, relationships
 
@@ -83,7 +77,6 @@ class NetworkAnalyzer:
                     )
                 )
             elif from_port is None and to_port is None:
-                # all-traffic / all-ports rule (e.g. -1 protocol)
                 findings.append(
                     NetworkFinding(
                         asset_id=asset.id,
@@ -118,8 +111,6 @@ class NetworkAnalyzer:
             for k in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets")
         )
         if block_all:
-            # public access block fully enabled — bucket policy can't make it
-            # public regardless of what the policy document says.
             return findings, relationships
 
         policy_raw = asset.raw_metadata.get("policy")
@@ -166,3 +157,75 @@ class NetworkAnalyzer:
             )
 
         return findings, relationships
+
+    # ------------------------------------------------------------------
+    # New: security-group-to-security-group reachability correlation.
+    #
+    # An SG rule can reference another SG as its source (UserIdGroupPairs)
+    # instead of a CIDR — this is the mechanism AWS itself uses to express
+    # "anything in the web tier can reach the db tier." Previously this
+    # platform only flagged CIDR-based 0.0.0.0/0 exposure; it never
+    # derived a CONNECTED_TO edge for SG-to-SG rules, so a resource behind
+    # a "safe-looking" SG (no public CIDR at all) that's actually reachable
+    # from another resource via an SG-to-SG rule was invisible to the
+    # attack path engine. This closes that gap.
+    # ------------------------------------------------------------------
+    def _derive_sg_to_sg_connectivity(self, assets: list[Asset]) -> list[Relationship]:
+        relationships: list[Relationship] = []
+
+        # Map security_group_id -> list of asset ids that USE it. Read
+        # directly from each resource's raw_metadata rather than
+        # requiring the caller to also pass in structural relationships —
+        # keeps this analyzer's interface (just `assets`) unchanged.
+        sg_to_resources: dict[str, list[str]] = {}
+        for asset in assets:
+            sg_ids: list[str] = []
+            if asset.type == NodeType.EC2:
+                sg_ids = asset.raw_metadata.get("security_groups", [])
+            elif asset.type == NodeType.RDS:
+                sg_ids = asset.raw_metadata.get("vpc_security_groups", [])
+            for sg_id in sg_ids:
+                sg_to_resources.setdefault(sg_id, []).append(asset.id)
+
+        for asset in assets:
+            if asset.type != NodeType.SECURITY_GROUP:
+                continue
+            target_sg_id = self._extract_sg_id(asset)
+
+            for perm in asset.raw_metadata.get("ip_permissions", []):
+                for pair in perm.get("UserIdGroupPairs", []):
+                    source_sg_id = pair.get("GroupId")
+                    if not source_sg_id:
+                        continue
+
+                    source_resources = sg_to_resources.get(source_sg_id, [])
+                    target_resources = sg_to_resources.get(target_sg_id, [])
+
+                    for source_resource_id in source_resources:
+                        for target_resource_id in target_resources:
+                            if source_resource_id == target_resource_id:
+                                continue
+                            relationships.append(
+                                Relationship(
+                                    source_id=source_resource_id,
+                                    target_id=target_resource_id,
+                                    type=EdgeType.CONNECTED_TO,
+                                    evidence={
+                                        "via_security_group": target_sg_id,
+                                        "allowed_from_security_group": source_sg_id,
+                                        "protocol": perm.get("IpProtocol"),
+                                        "from_port": perm.get("FromPort"),
+                                        "to_port": perm.get("ToPort"),
+                                    },
+                                    confidence=1.0,
+                                )
+                            )
+
+        return relationships
+
+    @staticmethod
+    def _extract_sg_id(sg_asset: Asset) -> str:
+        # Asset.id is formatted "aws:sg/{GroupId}" by AWSProvider — pull
+        # the raw GroupId back out since UserIdGroupPairs reference the
+        # raw AWS id, not our internal asset id format.
+        return sg_asset.id.split("/", 1)[-1]
