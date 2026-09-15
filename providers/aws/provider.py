@@ -150,11 +150,39 @@ class AWSProvider(CloudProvider):
             pab = bucket.get("PublicAccessBlock") or {}
             block_all = all(pab.get(k, False) for k in
                              ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"))
+            asset_id = f"aws:s3/{name}"
             scan.assets.append(
-                Asset(id=f"aws:s3/{name}", type=NodeType.S3, account_id=account_id, name=name, public=not block_all,
+                Asset(id=asset_id, type=NodeType.S3, account_id=account_id, name=name, public=not block_all,
                       raw_metadata={"policy": bucket.get("Policy"), "acl": bucket.get("ACL"),
-                                    "public_access_block": pab})
+                                    "public_access_block": pab, "encryption": bucket.get("Encryption")})
             )
+
+            kms_key_id = self._extract_kms_key_from_s3_encryption(bucket.get("Encryption"))
+            if kms_key_id:
+                scan.relationships.append(
+                    Relationship(source_id=asset_id, target_id=f"aws:kms/{kms_key_id}", type=EdgeType.ENCRYPTED_BY,
+                                 evidence={"sse_algorithm": "aws:kms"}, confidence=1.0)
+                )
+
+    @staticmethod
+    def _extract_kms_key_from_s3_encryption(encryption_config: dict | None) -> str | None:
+        if not encryption_config:
+            return None
+        for rule in encryption_config.get("Rules", []):
+            default = rule.get("ApplyServerSideEncryptionByDefault", {})
+            if default.get("SSEAlgorithm") == "aws:kms":
+                key_ref = default.get("KMSMasterKeyID")
+                if key_ref:
+                    return AWSProvider._normalize_kms_key_ref(key_ref)
+        return None
+
+    @staticmethod
+    def _normalize_kms_key_ref(kms_key_ref: str) -> str:
+        """KMS key references show up as either a bare key id or a full
+        ARN (arn:aws:kms:region:account:key/key-id) depending on the API
+        and even the specific field — normalize to just the key id so it
+        matches the `aws:kms/{key_id}` asset id format KMS assets use."""
+        return kms_key_ref.split("/")[-1] if "/" in kms_key_ref else kms_key_ref
 
     # -------------------------------------------------------------
     # New normalization for Lambda / RDS / Secrets Manager / KMS
@@ -232,6 +260,12 @@ class AWSProvider(CloudProvider):
                     Relationship(source_id=asset_id, target_id=f"aws:sg/{sg['VpcSecurityGroupId']}",
                                  type=EdgeType.USES, evidence={"security_group": sg["VpcSecurityGroupId"]})
                 )
+            kms_key_id = instance.get("KmsKeyId")
+            if kms_key_id:
+                scan.relationships.append(
+                    Relationship(source_id=asset_id, target_id=f"aws:kms/{self._normalize_kms_key_ref(kms_key_id)}",
+                                 type=EdgeType.ENCRYPTED_BY, evidence={"storage_encrypted": True}, confidence=1.0)
+                )
             if publicly_accessible:
                 scan.relationships.append(
                     Relationship(source_id="aws:internet", target_id=asset_id, type=EdgeType.EXPOSED_TO,
@@ -245,9 +279,10 @@ class AWSProvider(CloudProvider):
     def _normalize_secrets_manager(self, raw: dict, account_id: str, scan: ScanResult) -> None:
         for secret in raw["secrets"]:
             name = secret["Name"]
+            asset_id = f"aws:secret/{name}"
             scan.assets.append(
                 Asset(
-                    id=f"aws:secret/{name}",
+                    id=asset_id,
                     type=NodeType.SECRET,
                     account_id=account_id,
                     region=self.region,
@@ -256,10 +291,17 @@ class AWSProvider(CloudProvider):
                     raw_metadata={"resource_policy": secret.get("ResourcePolicy")},
                 )
             )
+            kms_key_id = secret.get("KmsKeyId")
+            if kms_key_id:
+                scan.relationships.append(
+                    Relationship(source_id=asset_id, target_id=f"aws:kms/{self._normalize_kms_key_ref(kms_key_id)}",
+                                 type=EdgeType.ENCRYPTED_BY, evidence={"kms_key_id": kms_key_id}, confidence=1.0)
+                )
             # NOTE: we never fetch or store the secret VALUE — only
-            # metadata (name, ARN, resource policy). CAN_READ edges from
-            # roles with secretsmanager:GetSecretValue are derived by
-            # engine/iam/analyzer.py from IAM policy analysis, not here.
+            # metadata (name, ARN, resource policy, KMS key). CAN_READ
+            # edges from roles with secretsmanager:GetSecretValue are
+            # derived by engine/iam/analyzer.py from IAM policy analysis,
+            # not here.
 
     def _normalize_kms(self, raw: dict, account_id: str, scan: ScanResult) -> None:
         for key in raw["keys"]:

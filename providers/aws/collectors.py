@@ -93,6 +93,10 @@ def collect_s3(session: boto3.Session) -> dict[str, Any]:
             entry["PublicAccessBlock"] = s3.get_public_access_block(Bucket=name)["PublicAccessBlockConfiguration"]
         except ClientError:
             entry["PublicAccessBlock"] = None
+        try:
+            entry["Encryption"] = s3.get_bucket_encryption(Bucket=name)["ServerSideEncryptionConfiguration"]
+        except ClientError:
+            entry["Encryption"] = None  # no default encryption configured
 
         enriched.append(entry)
 
