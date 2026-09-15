@@ -1,11 +1,3 @@
-// Phase 11 — API client.
-//
-// Thin typed wrapper around the endpoints backend/main.py actually
-// exposes today (Phase 8/10). Deliberately does NOT invent endpoints
-// for features that don't exist yet (findings list, MITRE, what-if) —
-// those pages are stubbed in the UI with a "not implemented yet" state
-// instead of fake data, see src/pages/*.
-
 export interface ScanSummary {
   scan_id: string;
   account_id: string;
@@ -51,6 +43,36 @@ export interface Statistics {
   critical_path_count: number;
 }
 
+export interface GraphNode {
+  id: string;
+  type: string;
+  label: string;
+  public: boolean;
+  max_severity: string | null;
+  on_attack_path: boolean;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  confidence: number;
+  max_severity: string | null;
+  on_attack_path: boolean;
+}
+
+export interface GraphPayload {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  stats: {
+    node_count: number;
+    edge_count: number;
+    attack_path_count: number;
+    nodes_on_attack_paths: number;
+  };
+}
+
 const BASE = '/api/v1';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -72,12 +94,6 @@ export const api = {
       body: JSON.stringify({ region, crown_jewel_ids: crownJewelIds }),
     }),
 
-  createScanAsync: (region = 'us-east-1', crownJewelIds: string[] = []) =>
-    request<ScanSummary>('/scans/async', {
-      method: 'POST',
-      body: JSON.stringify({ region, crown_jewel_ids: crownJewelIds }),
-    }),
-
   getScan: (scanId: string) => request<ScanSummary>(`/scans/${scanId}`),
 
   listAssets: (scanId?: string) =>
@@ -88,4 +104,8 @@ export const api = {
 
   getStatistics: (scanId?: string) =>
     request<Statistics>(`/statistics${scanId ? `?scan_id=${scanId}` : ''}`),
+
+  // New: full graph payload for the interactive attack graph page.
+  getGraph: (scanId?: string) =>
+    request<GraphPayload>(`/graph${scanId ? `?scan_id=${scanId}` : ''}`),
 };

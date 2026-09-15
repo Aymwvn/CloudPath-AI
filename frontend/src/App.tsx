@@ -2,11 +2,13 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { Dashboard } from './pages/Dashboard';
 import { Assets } from './pages/Assets';
 import { AttackPaths } from './pages/AttackPaths';
+import { AttackGraph } from './pages/AttackGraph';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', end: true },
   { to: '/assets', label: 'Assets' },
   { to: '/attack-paths', label: 'Attack Paths' },
+  { to: '/attack-graph', label: 'Attack Graph' },
 ];
 
 function Sidebar() {
@@ -35,8 +37,8 @@ function Sidebar() {
         ))}
       </nav>
       <p className="mt-8 px-2 text-[11px] leading-relaxed text-slate-600">
-        More pages (Attack Graph, IAM Analysis, MITRE ATT&CK, Crown Jewels) land as their
-        backend endpoints are built — see ARCHITECTURE.md Section 23.
+        More pages (IAM Analysis, MITRE ATT&CK, Crown Jewels) land as their backend endpoints
+        are built.
       </p>
     </aside>
   );
@@ -52,6 +54,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/attack-paths" element={<AttackPaths />} />
+            <Route path="/attack-graph" element={<AttackGraph />} />
           </Routes>
         </main>
       </div>

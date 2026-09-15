@@ -31,7 +31,7 @@ export function AttackPaths() {
       <h1 className="text-2xl font-bold text-slate-100">Attack Paths</h1>
       <p className="text-sm text-slate-500">
         Ranked by risk score. "Potential" status means at least one edge in the path has evidence
-        confidence below the threshold — see docs/PHASE5-8_NOTES.md.
+        confidence below the threshold.
       </p>
 
       {paths.length === 0 ? (
