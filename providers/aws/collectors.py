@@ -125,8 +125,9 @@ def collect_instance_profiles(session: boto3.Session) -> dict[str, str]:
 # what was already scoped for the platform from the start.
 # ---------------------------------------------------------------------
 def collect_lambda(session: boto3.Session) -> dict[str, Any]:
-    """Collect Lambda functions, their execution role, and resource
-    policy (which reveals public/cross-account invoke permissions)."""
+    """Collect Lambda functions, their execution role, resource policy,
+    VPC config (security groups, for SG-to-SG correlation), and KMS key
+    (for environment-variable encryption)."""
     lam = session.client("lambda")
     functions = []
 
@@ -142,6 +143,18 @@ def collect_lambda(session: boto3.Session) -> dict[str, Any]:
         fn["ResourcePolicy"] = policy
 
     return {"functions": functions}
+
+
+def collect_ebs_volumes(session: boto3.Session) -> dict[str, Any]:
+    """Collect EBS volumes — encryption status/KMS key and which
+    instance(s) each is attached to, so encryption can be attributed
+    back to the EC2 instance in the graph."""
+    ec2 = session.client("ec2")
+    volumes = []
+    paginator = ec2.get_paginator("describe_volumes")
+    for page in paginator.paginate():
+        volumes.extend(page["Volumes"])
+    return {"volumes": volumes}
 
 
 def collect_rds(session: boto3.Session) -> dict[str, Any]:

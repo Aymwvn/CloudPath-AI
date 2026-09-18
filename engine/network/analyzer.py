@@ -184,6 +184,8 @@ class NetworkAnalyzer:
                 sg_ids = asset.raw_metadata.get("security_groups", [])
             elif asset.type == NodeType.RDS:
                 sg_ids = asset.raw_metadata.get("vpc_security_groups", [])
+            elif asset.type == NodeType.LAMBDA:
+                sg_ids = asset.raw_metadata.get("security_groups", [])
             for sg_id in sg_ids:
                 sg_to_resources.setdefault(sg_id, []).append(asset.id)
 
@@ -200,6 +202,7 @@ class NetworkAnalyzer:
 
                     source_resources = sg_to_resources.get(source_sg_id, [])
                     target_resources = sg_to_resources.get(target_sg_id, [])
+                    confidence = self._egress_confidence(assets, source_sg_id, target_sg_id, perm)
 
                     for source_resource_id in source_resources:
                         for target_resource_id in target_resources:
@@ -217,11 +220,53 @@ class NetworkAnalyzer:
                                         "from_port": perm.get("FromPort"),
                                         "to_port": perm.get("ToPort"),
                                     },
-                                    confidence=1.0,
+                                    confidence=confidence,
                                 )
                             )
 
         return relationships
+
+    def _egress_confidence(self, assets: list[Asset], source_sg_id: str, target_sg_id: str, ingress_perm: dict) -> float:
+        """The target's ingress rule allowing the source SG is only half
+        the reachability story — the SOURCE's own egress rules have to
+        actually permit traffic out too. AWS default behavior: a freshly
+        created security group has no egress RESTRICTIONS configured
+        (an implicit/explicit allow-all-outbound rule), so an empty or
+        allow-all egress list means unrestricted (confidence 1.0, same as
+        before this change). If the source SG has been given explicit,
+        narrower egress rules, only full confidence when one of them
+        actually covers this destination — otherwise the target is still
+        listed (we don't silently drop real evidence), but at reduced
+        confidence, since the egress restriction makes the path
+        genuinely uncertain rather than disproven outright."""
+        source_sg_asset = next(
+            (a for a in assets if a.type == NodeType.SECURITY_GROUP and self._extract_sg_id(a) == source_sg_id), None
+        )
+        if source_sg_asset is None:
+            return 1.0  # source SG's rules aren't visible to us — can't second-guess with no evidence
+
+        egress_rules = source_sg_asset.raw_metadata.get("ip_permissions_egress", [])
+        if not egress_rules:
+            return 1.0  # no explicit egress restrictions configured — matches AWS's default allow-all-outbound
+
+        for egress_perm in egress_rules:
+            if self._is_allow_all_egress(egress_perm):
+                return 1.0
+            for pair in egress_perm.get("UserIdGroupPairs", []):
+                if pair.get("GroupId") == target_sg_id:
+                    return 1.0
+
+        # explicit egress rules exist, but none of them appear to permit
+        # reaching the target — evidence is genuinely uncertain, not
+        # proof of no path (there could be rules/routing we don't model)
+        return 0.5
+
+    @staticmethod
+    def _is_allow_all_egress(perm: dict) -> bool:
+        if perm.get("IpProtocol") == "-1":
+            return True
+        cidrs = [r.get("CidrIp") for r in perm.get("IpRanges", [])]
+        return any(c in WIDE_OPEN_CIDRS for c in cidrs if c)
 
     @staticmethod
     def _extract_sg_id(sg_asset: Asset) -> str:

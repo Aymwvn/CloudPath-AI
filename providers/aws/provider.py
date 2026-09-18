@@ -35,6 +35,7 @@ class AWSProvider(CloudProvider):
             (collectors.collect_rds, "rds"),
             (collectors.collect_secrets_manager, "secrets_manager"),
             (collectors.collect_kms, "kms"),
+            (collectors.collect_ebs_volumes, "ebs_volumes"),
         ):
             try:
                 raw = collect_fn(self.session)
@@ -55,6 +56,7 @@ class AWSProvider(CloudProvider):
             "rds": self._normalize_rds,
             "secrets_manager": self._normalize_secrets_manager,
             "kms": self._normalize_kms,
+            "ebs_volumes": self._normalize_ebs_volumes,
         }[label](raw, account_id, scan)
 
     def _normalize_iam(self, raw: dict, account_id: str, scan: ScanResult) -> None:
@@ -204,6 +206,13 @@ class AWSProvider(CloudProvider):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            # SG ids from VpcConfig — stored the same way EC2/RDS store
+            # theirs (`security_groups` key), so NetworkAnalyzer's SG-to-SG
+            # correlation (engine/network/analyzer.py) picks Lambda up
+            # automatically with no changes needed there.
+            vpc_config = fn.get("VpcConfig") or {}
+            security_group_ids = vpc_config.get("SecurityGroupIds", [])
+
             scan.assets.append(
                 Asset(
                     id=asset_id,
@@ -213,7 +222,12 @@ class AWSProvider(CloudProvider):
                     arn=fn.get("FunctionArn"),
                     name=name,
                     public=is_public,
-                    raw_metadata={"role": fn.get("Role"), "resource_policy": resource_policy},
+                    raw_metadata={
+                        "role": fn.get("Role"),
+                        "resource_policy": resource_policy,
+                        "security_groups": security_group_ids,
+                        "vpc_id": vpc_config.get("VpcId"),
+                    },
                 )
             )
             role_arn = fn.get("Role")
@@ -229,6 +243,20 @@ class AWSProvider(CloudProvider):
                                  evidence={"resource_policy": "public invoke permission"})
                 )
                 internet_needed = True
+
+            # Environment-variable KMS encryption. NOTE: verified against
+            # the documented AWS API shape (Lambda's `KMSKeyArn` field on
+            # list_functions/get_function), but NOT verified against moto
+            # — moto does not currently simulate this field at all (it
+            # always returns None/absent even when KMSKeyArn is set at
+            # creation, confirmed by testing directly before writing this).
+            # See docs/POST_V1_KMS_LAMBDA_EBS_NOTES.md for detail.
+            kms_key_arn = fn.get("KMSKeyArn")
+            if kms_key_arn:
+                scan.relationships.append(
+                    Relationship(source_id=asset_id, target_id=f"aws:kms/{self._normalize_kms_key_ref(kms_key_arn)}",
+                                 type=EdgeType.ENCRYPTED_BY, evidence={"env_var_encryption": True}, confidence=1.0)
+                )
 
         if internet_needed and not any(a.id == "aws:internet" for a in scan.assets):
             scan.assets.append(Asset(id="aws:internet", type=NodeType.INTERNET, account_id=account_id, name="Internet"))
@@ -317,6 +345,31 @@ class AWSProvider(CloudProvider):
                     raw_metadata={"key_manager": key.get("KeyManager"), "policy": key.get("Policy")},
                 )
             )
+
+    def _normalize_ebs_volumes(self, raw: dict, account_id: str, scan: ScanResult) -> None:
+        """EBS volumes aren't a first-class NodeType in the graph
+        vocabulary (ARCHITECTURE.md Section 11 doesn't define one) — an
+        encrypted volume's significance is "the EC2 instance it's
+        attached to is encrypted at rest," so this attributes encryption
+        as an ENCRYPTED_BY edge on the instance directly rather than
+        inventing a new node type for the volume itself."""
+        for volume in raw["volumes"]:
+            if not volume.get("Encrypted") or not volume.get("KmsKeyId"):
+                continue
+            kms_key_id = self._normalize_kms_key_ref(volume["KmsKeyId"])
+            for attachment in volume.get("Attachments", []):
+                instance_id = attachment.get("InstanceId")
+                if not instance_id:
+                    continue
+                scan.relationships.append(
+                    Relationship(
+                        source_id=f"aws:ec2/{instance_id}",
+                        target_id=f"aws:kms/{kms_key_id}",
+                        type=EdgeType.ENCRYPTED_BY,
+                        evidence={"volume_id": volume.get("VolumeId"), "encrypted_ebs_volume": True},
+                        confidence=1.0,
+                    )
+                )
 
     def discover_relationships(self, scan: ScanResult) -> ScanResult:
         seen = set()
