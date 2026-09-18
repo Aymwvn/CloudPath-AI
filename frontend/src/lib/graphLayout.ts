@@ -89,6 +89,11 @@ export function layoutGraph(
       style: { stroke: color, strokeWidth: edge.on_attack_path ? 2.5 : 1 },
       labelStyle: { fill: '#94a3b8', fontSize: 9 },
       markerEnd: { type: 'arrowclosed' as const, color },
+      // carries the full GraphEdge (including evidence) so the click
+      // handler in AttackGraph.tsx can show relationship detail without
+      // a second lookup — React Flow's `data` field is exactly meant
+      // for attaching arbitrary payload like this to an edge.
+      data: { graphEdge: edge },
     };
   });
 

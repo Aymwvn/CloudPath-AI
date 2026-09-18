@@ -134,6 +134,44 @@ def scan_status(scan_id: str) -> None:
     console.print(f"Assets: {result['asset_count']}, Relationships: {result['relationship_count']}")
 
 
+@scan.command("wait")
+@click.argument("scan_id")
+@click.option("--interval", default=3, show_default=True, help="Seconds between status checks.")
+@click.option("--timeout", default=300, show_default=True, help="Give up after this many seconds.")
+def scan_wait(scan_id: str, interval: int, timeout: int) -> None:
+    """Block and poll until an --async scan finishes (completed or
+    failed), instead of running `scan status` repeatedly by hand."""
+    import time
+
+    with _client() as client:
+        elapsed = 0
+        with console.status(f"Waiting for scan {scan_id}...") as status_display:
+            while elapsed < timeout:
+                try:
+                    result = client.get_scan(scan_id)
+                except APIError as exc:
+                    _handle_api_error(exc)
+                    return
+
+                state = result["status"]
+                status_display.update(f"Waiting for scan {scan_id}... (status: {state}, {elapsed}s elapsed)")
+
+                if state == "completed":
+                    console.print(f"[green]Scan complete:[/green] {result['scan_id']}")
+                    console.print(f"  Assets: {result['asset_count']}, Relationships: {result['relationship_count']}")
+                    return
+                if state == "failed":
+                    error_console.print(f"Scan failed: {result.get('errors') or 'no error detail available'}")
+                    sys.exit(1)
+
+                time.sleep(interval)
+                elapsed += interval
+
+        error_console.print(f"Timed out after {timeout}s waiting for scan {scan_id} (last status: {state}).")
+        error_console.print(f"It may still be running — check again with: cloudpath scan status {scan_id}")
+        sys.exit(1)
+
+
 # ----------------------------------------------------------------------
 # Assets
 # ----------------------------------------------------------------------

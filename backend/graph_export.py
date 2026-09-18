@@ -51,6 +51,7 @@ class GraphEdgeOut:
     target: str
     type: str
     confidence: float
+    evidence: dict
     max_severity: str | None
     on_attack_path: bool
 
@@ -61,6 +62,7 @@ class GraphEdgeOut:
             "target": self.target,
             "type": self.type,
             "confidence": self.confidence,
+            "evidence": self.evidence,
             "max_severity": self.max_severity,
             "on_attack_path": self.on_attack_path,
         }
@@ -113,6 +115,7 @@ def build_graph_payload(record: ScanRecord) -> dict:
                 target=target,
                 type=data.get("type", "UNKNOWN"),
                 confidence=data.get("confidence", 1.0),
+                evidence=data.get("evidence", {}),
                 max_severity=edge_severity.get(edge_key),
                 on_attack_path=edge_key in edge_severity,
             ).to_dict()

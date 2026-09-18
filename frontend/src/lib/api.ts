@@ -58,6 +58,7 @@ export interface GraphEdge {
   target: string;
   type: string;
   confidence: number;
+  evidence: Record<string, unknown>;
   max_severity: string | null;
   on_attack_path: boolean;
 }

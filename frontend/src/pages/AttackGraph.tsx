@@ -7,6 +7,7 @@ import {
   useNodesState,
   useEdgesState,
   type Node,
+  type Edge,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
@@ -17,6 +18,7 @@ export function AttackGraph() {
   const [payload, setPayload] = useState<GraphPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [showOnlyAttackPaths, setShowOnlyAttackPaths] = useState(false);
 
   useEffect(() => {
@@ -51,12 +53,19 @@ export function AttackGraph() {
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setSelectedNodeId(node.id);
+    setSelectedEdgeId(null);
+  }, []);
+
+  const onEdgeClick = useCallback((_: React.MouseEvent, edge: Edge) => {
+    setSelectedEdgeId(edge.id);
+    setSelectedNodeId(null);
   }, []);
 
   const selectedNodeDetail = payload?.nodes.find((n) => n.id === selectedNodeId) ?? null;
   const relatedEdges = payload?.edges.filter(
     (e) => e.source === selectedNodeId || e.target === selectedNodeId
   );
+  const selectedEdgeDetail = payload?.edges.find((e) => e.id === selectedEdgeId) ?? null;
 
   if (error) {
     return (
@@ -113,6 +122,7 @@ export function AttackGraph() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onNodeClick={onNodeClick}
+              onEdgeClick={onEdgeClick}
               fitView
               colorMode="dark"
             >
@@ -155,7 +165,7 @@ export function AttackGraph() {
           {relatedEdges && relatedEdges.length > 0 && (
             <div className="mt-4">
               <h3 className="mb-2 text-xs font-semibold text-slate-400">
-                Relationships ({relatedEdges.length})
+                Relationships ({relatedEdges.length}) — click one on the graph for full detail
               </h3>
               <ul className="space-y-1.5">
                 {relatedEdges.map((e) => (
@@ -170,6 +180,41 @@ export function AttackGraph() {
               </ul>
             </div>
           )}
+        </aside>
+      )}
+
+      {selectedEdgeDetail && (
+        <aside className="w-72 shrink-0 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-200">Relationship Detail</h2>
+            <button
+              onClick={() => setSelectedEdgeId(null)}
+              className="text-slate-500 hover:text-slate-300"
+            >
+              ✕
+            </button>
+          </div>
+          <dl className="space-y-2 text-xs">
+            <Detail label="Type" value={selectedEdgeDetail.type} />
+            <Detail label="Source" value={selectedEdgeDetail.source} mono />
+            <Detail label="Target" value={selectedEdgeDetail.target} mono />
+            <Detail label="Confidence" value={`${(selectedEdgeDetail.confidence * 100).toFixed(0)}%`} />
+            <Detail label="On attack path" value={selectedEdgeDetail.on_attack_path ? 'Yes' : 'No'} />
+            {selectedEdgeDetail.max_severity && (
+              <Detail label="Max severity" value={selectedEdgeDetail.max_severity} />
+            )}
+          </dl>
+
+          <div className="mt-4">
+            <h3 className="mb-2 text-xs font-semibold text-slate-400">Evidence</h3>
+            {Object.keys(selectedEdgeDetail.evidence).length === 0 ? (
+              <p className="text-[11px] text-slate-600">No evidence recorded for this relationship.</p>
+            ) : (
+              <pre className="overflow-x-auto rounded bg-slate-800/50 p-2 text-[10px] text-slate-400">
+                {JSON.stringify(selectedEdgeDetail.evidence, null, 2)}
+              </pre>
+            )}
+          </div>
         </aside>
       )}
     </div>

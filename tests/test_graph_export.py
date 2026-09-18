@@ -28,7 +28,8 @@ def _escalation_scan() -> ScanResult:
     scan.relationships = [
         Relationship(source_id="aws:internet", target_id="aws:ec2/i-1", type=EdgeType.EXPOSED_TO, confidence=1.0),
         Relationship(source_id="aws:ec2/i-1", target_id="aws:iam:role/RoleA", type=EdgeType.RUNS_AS, confidence=1.0),
-        Relationship(source_id="aws:iam:role/RoleA", target_id="aws:iam:role/RoleB", type=EdgeType.CAN_PASS_ROLE, confidence=0.9),
+        Relationship(source_id="aws:iam:role/RoleA", target_id="aws:iam:role/RoleB", type=EdgeType.CAN_PASS_ROLE,
+                     confidence=0.9, evidence={"action": "iam:PassRole"}),
         Relationship(source_id="aws:iam:role/RoleB", target_id="aws:secret/prod-password", type=EdgeType.CAN_READ, confidence=0.9),
     ]
     return scan
@@ -44,6 +45,24 @@ def _build_record(scan: ScanResult, targets: list[str]) -> ScanRecord:
 
 
 class TestGraphPayloadStructure:
+    def test_edges_include_evidence_for_click_detail(self):
+        """Edge evidence must be included in the payload — this is what
+        the frontend's edge-click detail panel (ARCHITECTURE.md Section
+        24: 'clicking an edge should show relationship/evidence/...')
+        actually displays; without it the feature would have nothing
+        real to show."""
+        scan = _escalation_scan()
+        record = _build_record(scan, targets=["aws:secret/prod-password"])
+        payload = build_graph_payload(record)
+
+        pass_role_edge = next(e for e in payload["edges"] if e["type"] == "CAN_PASS_ROLE")
+        assert "evidence" in pass_role_edge
+        # confirms evidence actually flows through Relationship ->
+        # GraphEngine -> build_graph_payload end to end, not just that
+        # the key exists on the response shape
+        assert pass_role_edge["evidence"] == {"action": "iam:PassRole"}
+
+
     def test_includes_every_node_and_edge_not_just_attack_path_ones(self):
         scan = _escalation_scan()
         record = _build_record(scan, targets=["aws:secret/prod-password"])

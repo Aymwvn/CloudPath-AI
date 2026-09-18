@@ -274,3 +274,31 @@ class TestStatus:
         assert result.exit_code == 0
         assert "reachable" in result.output
 
+
+class TestScanWait:
+    @mock_aws
+    def test_wait_on_an_already_completed_scan_returns_immediately(self, runner, live_server_url):
+        """The test server's /scans endpoint is synchronous (matches
+        Phase 8) — a scan created through it is already 'completed' by
+        the time `scan wait` polls it, so this confirms the first-poll
+        success path without needing async infrastructure."""
+        _seed_mocked_aws()
+        runner.invoke(cli_main.cli, ["login", "--url", live_server_url, "--username", "admin", "--password", "admin-password"])
+        scan_result = runner.invoke(cli_main.cli, ["scan", "aws"])
+        # extract the scan_id the way a real user would read it off stdout
+        import re
+        match = re.search(r"Scan complete:\s*(\S+)", scan_result.output)
+        assert match, f"could not find scan_id in output: {scan_result.output}"
+        scan_id = match.group(1)
+
+        result = runner.invoke(cli_main.cli, ["scan", "wait", scan_id, "--interval", "1", "--timeout", "5"])
+        assert result.exit_code == 0
+        assert "Scan complete" in result.output
+
+    def test_wait_on_unknown_scan_id_reports_404(self, runner, live_server_url):
+        runner.invoke(cli_main.cli, ["login", "--url", live_server_url, "--username", "admin", "--password", "admin-password"])
+        result = runner.invoke(cli_main.cli, ["scan", "wait", "does-not-exist", "--interval", "1", "--timeout", "3"])
+        assert result.exit_code == 1
+        assert "404" in result.output or "not found" in result.output.lower()
+
+
